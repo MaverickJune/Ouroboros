@@ -8,10 +8,16 @@ guess_set_size = 20
 lookahead_level = 7
 gamma = 12
 
-small_model = LlamaForCausalLM.from_pretrained("/data/Yi-6b", torch_dtype=torch.float16, device_map='cuda')
-target_model = LlamaForCausalLM.from_pretrained("/data/Yi-34b", torch_dtype=torch.float16, device_map='cuda')
+target_model_path = "lmsys/vicuna-7b-v1.3"
+small_model_path = ""
 
-tokenizer = AutoTokenizer.from_pretrained("/data/Yi-6b")
+# TODO:
+# 1. Change the device map of the models
+
+small_model = LlamaForCausalLM.from_pretrained(target_model_path, torch_dtype=torch.float16, device_map='cuda')
+target_model = LlamaForCausalLM.from_pretrained(small_model_path, torch_dtype=torch.float16, device_map='cuda')
+
+tokenizer = AutoTokenizer.from_pretrained("target_model_path", use_fast=False)
 
 prompt = "Please summarize the following paragraph. Officers searched properties in the Waterfront Park and Colonsay View areas of the city on Wednesday. Detectives said three firearms, ammunition and a five-figure sum of money were recovered. A 26-year-old man who was arrested and charged appeared at Edinburgh Sheriff Court on Thursday. Summary: "
 

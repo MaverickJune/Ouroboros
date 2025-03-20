@@ -34,7 +34,8 @@ def ouroboros(prefix : torch.Tensor, approx_model : torch.nn.Module, target_mode
     T = seq_len + max_len
     
     assert prefix.shape[0] == 1, "input batch size must be 1"
-
+    
+    # TODO: Change this Assertion
     assert approx_model.device == target_model.device
     
     device = target_model.device
