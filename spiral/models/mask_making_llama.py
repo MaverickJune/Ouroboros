@@ -1,4 +1,6 @@
 import torch
+import logging
+import colorlog
 
 
 def j_make_causal_mask_with_guess(
@@ -67,6 +69,7 @@ def j_make_causal_mask_multilevel(
     Make causal mask used for bi-directional self-attention.
     Now support input more than 1 token when is_prefill == False
     """
+    print("db 1")
     bsz, tgt_len = input_ids_shape
     tgt_len -= extra_input_length
     mask = torch.full((tgt_len, tgt_len), torch.finfo(dtype).min, device=device)
@@ -79,8 +82,10 @@ def j_make_causal_mask_multilevel(
         assert past_key_values_length == 0
         assert guess is None
         return mask[None, None, :, :].expand(bsz, 1, tgt_len, tgt_len + past_key_values_length)
-    
+
     tiny_mask_size = level_sizes[0] + 1
+
+
     mask_cond = torch.arange(tiny_mask_size, device=device)
     hm = mask_cond < (mask_cond + 1).view(tiny_mask_size, 1)
 

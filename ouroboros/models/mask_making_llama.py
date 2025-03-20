@@ -80,6 +80,8 @@ def j_make_causal_mask_multilevel(
         assert guess is None
         return mask[None, None, :, :].expand(bsz, 1, tgt_len, tgt_len + past_key_values_length)
     
+    logger.info(f"level_sizes: {level_sizes}")
+
     tiny_mask_size = level_sizes[0] + 1
     mask_cond = torch.arange(tiny_mask_size, device=device)
     hm = mask_cond < (mask_cond + 1).view(tiny_mask_size, 1)

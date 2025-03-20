@@ -803,6 +803,7 @@ class LlamaModel(LlamaPreTrainedModel):
         
         #print("size: ", input_shape, past_key_values_length)
         if input_shape[-1] > 1:
+            # logger.info("reached here")
             combined_attention_mask = j_make_causal_mask_multilevel(
                 level_sizes,
                 is_prefill,            
