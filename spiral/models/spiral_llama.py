@@ -24,7 +24,8 @@ import torch.utils.checkpoint
 from torch import nn
 
 from transformers.activations import ACT2FN
-from transformers.cache_utils import Cache, DynamicCache, StaticCache
+from transformers.cache_utils import Cache, StaticCache
+from models.spiral_cache_utils import DynamicCache
 from transformers.generation import GenerationMixin
 from transformers.modeling_attn_mask_utils import AttentionMaskConverter
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
@@ -818,16 +819,19 @@ class LlamaModel(LlamaPreTrainedModel):
                 past_key_values_length=past_key_values_length,
                 extra_input_length=extra_input_length,
             )
+            logger.info(f"combined_attention_mask: {combined_attention_mask}")
         if attention_mask is not None:
             
             # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
             expanded_attn_mask = _expand_mask(attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]).to(
                 inputs_embeds.device
             )
+            logger.info(f"expanded_attn_mask: {expanded_attn_mask}")
             #print("shape: ", expanded_attn_mask.size(), combined_attention_mask.size())
             combined_attention_mask = (
                 expanded_attn_mask if combined_attention_mask is None else expanded_attn_mask + combined_attention_mask
             )
+            logger.info(f"combined_attention_mask: {combined_attention_mask}")
 
         return combined_attention_mask
     
@@ -851,6 +855,7 @@ class LlamaModel(LlamaPreTrainedModel):
         guess: Optional[torch.Tensor] = None,
         extra_input_length: int =0,
         debug = False,
+        cache_position: Optional[torch.LongTensor] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         r"""
         I will add the docstring after I fully understand the code...
@@ -880,18 +885,26 @@ class LlamaModel(LlamaPreTrainedModel):
         if past_key_values is not None:
             past_key_values_length = past_key_values[0][0].shape[2]
             seq_length_with_past = seq_length_with_past + past_key_values_length
-
-        if position_ids is None:
-            device = input_ids.device if input_ids is not None else inputs_embeds.device
-            position_ids = torch.arange(
-                past_key_values_length, seq_length + past_key_values_length, dtype=torch.long, device=device
-            )
-            position_ids = position_ids.unsqueeze(0).view(-1, seq_length)
-        else:
-            position_ids = position_ids.view(-1, seq_length).long()
+            
+        ############################################################################################
+        if use_cache and past_key_values is None:
+            past_key_values = DynamicCache()
             
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
+
+        if cache_position is None:
+            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+            cache_position = torch.arange(
+                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+            )
+
+        if position_ids is None:
+            position_ids = cache_position.unsqueeze(0)  
+        else:
+            position_ids = position_ids.view(-1, seq_length).long()
+        #############################################################################################    
+            
         # embed positions
         if attention_mask is None:
             attention_mask = torch.ones(
@@ -911,6 +924,50 @@ class LlamaModel(LlamaPreTrainedModel):
             attention_mask, (batch_size, seq_length), inputs_embeds, past_key_values_length, (WINDOWS_SIZE, is_prefill, guess, guess_size, not_seq, continue_all, level_sizes, extra_input_length), 
         )
         
+        hidden_states = inputs_embeds
+        
+        # create position embeddings to be shared across the decoder layers
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        
+        all_hidden_states = () if output_hidden_states else None
+        all_self_attns = () if output_attentions else None
+        next_decoder_cache = () if use_cache else None
+        
+        for idx, decoder_layer in enumerate(self.layers):
+            if output_hidden_states:
+                all_hidden_states += (hidden_states,)
+            # past_key_value = past_key_values[idx] if past_key_values is not None else None
+            layer_outputs = decoder_layer.forward(
+                hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_values,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                padding_mask=padding_mask,
+                position_embeddings=position_embeddings,
+            )
+            
+            # logger.info(f"layer_outputs: {layer_outputs}")
+            # logger.info(f"return_dict: {return_dict}")
+            
+            hidden_states = layer_outputs[0]
+            if output_attentions:
+                all_self_attns += (layer_outputs[1],)
+                
+        hidden_states = self.norm(hidden_states)
+        
+        if output_hidden_states:
+            all_hidden_states += (hidden_states,)
+        
+        if not return_dict:
+            return tuple(v for v in [hidden_states, past_key_values, all_hidden_states, all_self_attns] if v is not None)
+        return BaseModelOutputWithPast(
+            last_hidden_state=hidden_states,
+            past_key_values=past_key_values,
+            hidden_states=all_hidden_states,
+            attentions=all_self_attns,
+        )
 
 
 class KwargsForCausalLM(FlashAttentionKwargs, LossKwargs): ...
@@ -1510,7 +1567,20 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             guess=guess_tokens,
             extra_input_length=extra_input_length,
             debug=debug,
+            cache_position=cache_position,
         )
+        
+        logger.info(f"outputs type: {type(outputs)}")
+        
+        hidden_states = outputs[0]
+        logits = self.lm_head(hidden_states)
+        logits = logits.float()
+        loss = None
+        
+        if not return_dict:
+            output = (logits,) + outputs[1:]
+            return (loss,) + output if loss is not None else output
+        
         
          
 
