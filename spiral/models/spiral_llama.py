@@ -1421,9 +1421,16 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         logger.info(f"GUESS_SIZE: {GUESS_SIZE}")
         logger.info(f"LEVEL: {LEVEL}")
         logger.info(f"WINDOW_SIZE: {WINDOW_SIZE}")
+        logger.info(f"GUESS_SET_SIZE: {GUESS_SET_SIZE}")
         
         while True:
-            if steps >= 2:
+            if past_tokens[LEVEL-2] is not None:
+                logger.info(f"steps: {steps}")
+                logger.info(f"fill_level: {fill_level}")
+                logger.info(f"past_tokens: {past_tokens}")
+                for idx, item in enumerate(past_tokens):
+                    logger.info(f"{idx} item's length: {len(item)}")
+                logger.info(f"cache engine state: {ngram_cache.token_map}")
                 logger.info(f"Terminate the loop for the debugging purpose")
                 break
             
