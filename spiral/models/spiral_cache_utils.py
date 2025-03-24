@@ -17,7 +17,8 @@ from transformers.utils import (
 )
 from transformers.utils.deprecation import deprecate_kwarg
 
-logger = logging.get_logger(__name__)
+from spiral.log_config import get_logger
+logger = get_logger(__name__) 
 
 
 class Cache(torch.nn.Module):

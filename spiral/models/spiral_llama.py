@@ -60,25 +60,10 @@ import copy
 import inspect
 import random
 import time
-import logging
-import colorlog
 
-log_format = "%(log_color)s%(filename)s:%(lineno)d%(reset)s  %(message)s"
-handler = colorlog.StreamHandler()
-handler.setFormatter(colorlog.ColoredFormatter(
-    log_format,
-    log_colors={
-        "DEBUG": "blue",
-        "INFO": "green",
-        "WARNING": "yellow",
-        "ERROR": "red",
-        "CRITICAL": "bold_red",
-    }
-))
+from spiral.log_config import get_logger
+logger = get_logger(__name__) 
 
-logger = logging.getLogger(__name__)
-logger.addHandler(handler)
-logger.setLevel(logging.DEBUG)
 ##########################################################################################
 
 _CHECKPOINT_FOR_DOC = "meta-llama/Llama-2-7b-hf"
@@ -801,6 +786,7 @@ class LlamaModel(LlamaPreTrainedModel):
         combined_attention_mask = None
         
         logger.info(f"others: {others}")
+        logger.info(f"input_shape: {input_shape}")
         
         #print("size: ", input_shape, past_key_values_length)
         if input_shape[-1] > 1:
@@ -868,7 +854,7 @@ class LlamaModel(LlamaPreTrainedModel):
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         
-        logger.info("reached here safely")
+        # logger.info("reached here safely")
         
         # retrieve input_ids and inputs_embeds
         if input_ids is not None and inputs_embeds is not None:
@@ -894,15 +880,19 @@ class LlamaModel(LlamaPreTrainedModel):
             inputs_embeds = self.embed_tokens(input_ids)
 
         if cache_position is None:
-            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+            past_seen_tokens = len(past_key_values) if past_key_values is not None else 0
             cache_position = torch.arange(
                 past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
             )
 
         if position_ids is None:
-            position_ids = cache_position.unsqueeze(0)  
+            position_ids = cache_position.unsqueeze(0)
+            raise NotImplementedError("position_ids is None")
         else:
             position_ids = position_ids.view(-1, seq_length).long()
+            
+        logger.info(f"position_ids: {position_ids}")
+            
         #############################################################################################    
             
         # embed positions
@@ -919,6 +909,7 @@ class LlamaModel(LlamaPreTrainedModel):
         
         logger.info(f"padding_mask: {padding_mask}")
         logger.info(f"attention_mask: {attention_mask}")
+        logger.info(f"past_key_values_length: {past_key_values_length}")
         
         attention_mask = self.j_prepare_decoder_attention_mask(
             attention_mask, (batch_size, seq_length), inputs_embeds, past_key_values_length, (WINDOWS_SIZE, is_prefill, guess, guess_size, not_seq, continue_all, level_sizes, extra_input_length), 
@@ -1424,9 +1415,24 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             ngram_cache = ngram_cache
             
         # Starts the main loop
+        this_peer_finished = False
+        iter_count = 0
+        
+        logger.info(f"GUESS_SIZE: {GUESS_SIZE}")
+        logger.info(f"LEVEL: {LEVEL}")
+        logger.info(f"WINDOW_SIZE: {WINDOW_SIZE}")
+        
         while True:
+            if steps >= 2:
+                logger.info(f"Terminate the loop for the debugging purpose")
+                break
+            
+            logger.info(f"steps: {steps}")
+            logger.info(f"guess_tokens: {guess_tokens}") 
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs) 
-            logger.info(f"model_inputs: {model_inputs}")
+            updated_input_ids = model_inputs["input_ids"]
+            # logger.info(f"model_inputs: {model_inputs}")
+            logger.info(f"updated input ids: {updated_input_ids}")
             
             # Currently this if block is not used, and will be further examined in the future
             if past_tokens[LEVEL - 2] is not None and ngram_cache.has(lst_token) and GUESS_SET_SIZE > 0:  
@@ -1439,6 +1445,8 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
                 
             assert return_dict_in_generate == False
             assert len(logits_processor) == 0
+            
+            logger.info(f"past_tokens: {past_tokens}")
             
             outputs = self.jforward_multilevel(
                 **model_inputs,
@@ -1456,7 +1464,162 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
                 debug = debug and steps > 6,
             )
             
-            break
+            steps += 1
+            if past_tokens[LEVEL - 2] is None:
+                next_token_logits = outputs.out_logits
+            else:
+                next_token_logits = outputs.out_logits
+                
+            next_tokens_scores = next_token_logits
+            next_tokens = torch.argmax(next_tokens_scores, dim=-1)
+            
+            if eos_token_id is not None:
+                if pad_token_id is None:
+                    raise ValueError("If `eos_token_id` is defined, make sure that `pad_token_id` is defined.")
+                next_tokens = next_tokens * unfinished_sequences + pad_token_id * (1 - unfinished_sequences)
+                
+            max_hit = 0
+            first_guess = next_tokens.item()
+            hits = [first_guess] + [0] * (GUESS_SIZE - 1)
+            
+            logger.info(f"hits: {hits}")
+            
+            new_results = []
+            if past_tokens[1] is None:
+                assert fill_level == 0
+                past_tokens[0] = past_tokens[0][1:]
+                past_tokens[1] = torch.argmax(outputs.inp_logits, dim=-1)[0].tolist()
+                logger.info(f"past_tokens[1]: {past_tokens[1]}")
+                
+                fill_level += 1
+            elif past_tokens[LEVEL - 2] is None:
+                for level in range(fill_level + 1):
+                    past_tokens[level] = past_tokens[level][1:] 
+
+                past_tokens[fill_level + 1] = torch.argmax(outputs.inp_logits, dim=-1)[0].tolist()[1:]
+                
+                fill_level += 1
+            else:
+                if guess_tokens is not None:
+                    guess_results = torch.argmax(outputs.guess_logits, dim=-1)[0].tolist()
+                    max_guess = None
+                    for eg in range(len(guess_results) // GUESS_SIZE):
+                        egx = eg * GUESS_SIZE
+                        correct = [first_guess] + guess_results[egx:egx + GUESS_SIZE]
+                        myguess = guess_tokens[egx:egx + GUESS_SIZE]
+                        gg = 0
+                        for gg in range(len(myguess)):
+                            if myguess[gg] != correct[gg]:
+                                break 
+                        if gg > max_hit:
+                            max_hit = gg 
+                            hit_point = eg 
+                            hits[:max_hit + 1] = correct[:max_hit + 1]
+                            max_guess = myguess
+                    if max_guess is not None:
+                        max_guess = tuple(max_guess)
+                        # ngram_cache.update(lst_token, max_guess)
+
+                new_results = torch.argmax(outputs.inp_logits, dim=-1)[0].tolist()
+                
+                assert len(past_tokens[LEVEL - 2]) == WINDOW_SIZE and len(new_results) == WINDOW_SIZE
+
+
+                ngram_cache.insert(lst_token, new_results, past_tokens, GUESS_SET_SIZE, LEVEL, WINDOW_SIZE)
+
+                past_tokens[0] = past_tokens[1][1:]
+                for level in range(1, LEVEL - 2):
+                    past_tokens[level] = past_tokens[level + 1][:]
+                past_tokens[LEVEL - 2] = new_results   
+                
+            if max_hit > 0:
+                attention_mask = model_kwargs["attention_mask"]
+                model_kwargs["attention_mask"] = torch.cat((attention_mask, torch.ones(1, max_hit, device=attention_mask.device, dtype=attention_mask.dtype)), dim=1)
+                
+            # Manage KV Cache
+            # Modified for the newer version of transformers
+            # past_key_values = []
+            for idx, kv in enumerate(outputs.past_key_values):
+                for hh in range(max_hit):
+                    assert outputs.step_len == kv[0].size(2)
+                    kv[0][:, :, outputs.kvcache_len + hh, :] = kv[0][:,:,outputs.step_len-len(guess_tokens)+hit_point * GUESS_SIZE + hh,:]
+                    kv[1][:,:,outputs.kvcache_len + hh,:] = kv[1][:,:,outputs.step_len-len(guess_tokens)+hit_point * GUESS_SIZE + hh,:]
+                # re-assignment is needed!
+                outputs.past_key_values.key_cache[idx] = kv[0][:,:,:outputs.kvcache_len + max_hit,:]
+                outputs.past_key_values.value_cache[idx] = kv[1][:,:,:outputs.kvcache_len + max_hit,:]
+                # past_key_values.append( (kv[0][:,:,:outputs.kvcache_len + max_hit,:], kv[1][:,:,:outputs.kvcache_len + max_hit,:]) )
+            # outputs.past_key_values = past_key_values
+            
+            lst_token = hits[max_hit]
+            def sublist(lst1, lst2):
+                ls1 = [element for element in lst1 if element in lst2]
+                ls2 = [element for element in lst2 if element in lst1]
+                return ls1 == ls2
+            
+            for hh in range(max_hit + 1):
+                logger.info(f"count: {hh}")
+                if eos_token_id is not None and hits[hh] == eos_token_id[0]:
+                    all_old_tokens.append(hits[hh])
+                    next_tokens = eos_token_id_tensor
+                    max_hit = hh
+                    break
+                else:
+                    all_old_tokens.append(hits[hh])
+                    
+            input_ids = torch.cat([input_ids, torch.tensor(hits[:max_hit + 1], device=next_tokens.device, dtype=next_tokens.dtype).unsqueeze(0)], dim=-1)
+            
+            if continue_ctx is None:
+                continue_ctx = {}
+            continue_ctx['past_key_values'] = outputs.past_key_values
+            continue_ctx['past_tokens'] = past_tokens
+            continue_ctx['fill_level'] = fill_level
+            continue_ctx['cur_input_ids'] = input_ids
+            # continue_ctx['token_map'] = token_map
+            continue_ctx['ngram_cache'] = ngram_cache
+            self.ctx = continue_ctx
+            
+            logger.info(f"added dummy if statement to deal with cache_position... meaningless")
+            if model_kwargs['use_cache']:
+                model_kwargs['cache_position'] = torch.arange(5)
+            
+            model_kwargs = self._update_model_kwargs_for_generation(
+                outputs, model_kwargs, is_encoder_decoder=self.config.is_encoder_decoder
+            )
+            
+             # if eos_token was found in one sentence, set sentence to finished
+            if eos_token_id_tensor is not None:
+                unfinished_sequences = unfinished_sequences.mul(
+                    next_tokens.tile(eos_token_id_tensor.shape[0], 1).ne(eos_token_id_tensor.unsqueeze(1)).prod(dim=0)
+                )
+
+                # stop when each sentence is finished
+                if unfinished_sequences.max() == 0:
+                    this_peer_finished = True
+
+            # stop if we exceed the maximum length
+            if stopping_criteria(input_ids, scores):
+                this_peer_finished = True
+                
+            
+            if this_peer_finished:
+                logger.info(f"this_peer_finished is True")
+                break
+            
+            logger.info(f"reached the debugging breakpoint")
+            iter_count += 1
+            
+        for criteria in stopping_criteria:
+            if hasattr(criteria, "max_length"):
+                #print("steop: ",  criteria.max_length, init_len, len(all_old_tokens), input_ids.size())
+                all_old_tokens = all_old_tokens[:criteria.max_length]
+                input_ids = input_ids[:,:criteria.max_length]
+        if max_length is not None:
+            #print("max : ", max_length, init_len)
+            all_old_tokens = all_old_tokens[:init_len + max_length]
+            input_ids = input_ids[:][:init_len + max_length]
+            
+        return input_ids
+            
         
     
     def jforward_multilevel(
@@ -1480,7 +1643,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         debug = False,
-        cache_position = None
+        cache_position: Optional[torch.LongTensor] = None,
         
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
@@ -1496,6 +1659,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         assert labels is None, " Inference Mode "
         assert input_ids.size(0) == 1, " single batch only "
         if level is not None:
+            logger.info(f"level is not None")
             assert level == len(past_tokens) + 1
             assert guess_size == level - 1
         
@@ -1506,13 +1670,17 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             past_size = 0
             
         logger.info(f"past_size: {past_size}")
+        logger.info(f"initial position_ids: {position_ids}")
         
         prefill_size = input_ids.size(1) 
         extra_input_length = input_ids.size(1) - 1
         if past_tokens[1] is None:
+            logger.info("past_tokens[1] is None")
             extra_input_length = 0 # when prefilling, do not support extra input ids
         for layer in self.model.layers:
             layer.self_attn.cur_len = prefill_size
+            
+        logger.info(f"extra_input_length: {extra_input_length}")
             
         level_sizes = []
 
@@ -1528,6 +1696,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         for ll in range(fill_level + 1):
             all_past += past_tokens[ll]
             attn_size += len(past_tokens[ll])
+            level_sizes.append(len(past_tokens[ll]))
             
             # idx_list: last idx of input_ids -> +past_tokens[ll]
             # past_tokens = [[set_token() for _ in range(WINDOW_SIZE + LEVEL - 3)]] + [None for _ in range(LEVEL - 2)]
@@ -1570,7 +1739,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             cache_position=cache_position,
         )
         
-        logger.info(f"outputs type: {type(outputs)}")
+        # logger.info(f"outputs type: {type(outputs)}")
         
         hidden_states = outputs[0]
         logits = self.lm_head(hidden_states)
@@ -1579,7 +1748,40 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         
         if not return_dict:
             output = (logits,) + outputs[1:]
+            raise NotImplementedError("Currently, we only consider return_dict=True")
             return (loss,) + output if loss is not None else output
+        
+        ret = CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits.to(input_ids.device),
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+        
+        ret.kvcache_len = prefill_size + past_size
+        ret.step_len = step_len
+        
+        logger.info(f"shape of kv cache: {ret.past_key_values[0][0].shape}")
+        logger.info(f"value of kvcache_len: {ret.kvcache_len}")
+        
+        if guess_tokens is not None:
+            lguess = len(guess_tokens)
+        else:
+            lguess = 0
+            
+        ret.out_logits = ret.logits[:, prefill_size-1,:].to(input_ids.device)
+        assert fill_level != -1
+        if lguess > 0:
+            ret.inp_logits = ret.logits[:,-len(past_tokens[fill_level])-lguess:-lguess,:].to(input_ids.device)
+            ret.guess_logits = ret.logits[:,-lguess:,:].to(input_ids.device)
+        else:
+            ret.inp_logits = ret.logits[:,-len(past_tokens[fill_level]):,:].to(input_ids.device)
+            
+        logger.info(f"shape of inp_logits: {ret.inp_logits.shape}")
+            
+        return ret
+        
         
         
          

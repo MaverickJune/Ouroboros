@@ -1,5 +1,6 @@
 import torch
 from spiral.log_config import get_logger
+logger = get_logger(__name__) 
 
 
 def j_make_causal_mask_with_guess(
