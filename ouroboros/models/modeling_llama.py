@@ -917,6 +917,7 @@ class LlamaModel(LlamaPreTrainedModel):
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
+            
         # embed positions
         if attention_mask is None:
             attention_mask = torch.ones(

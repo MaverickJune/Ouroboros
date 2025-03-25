@@ -547,6 +547,161 @@ class LlamaModel(LlamaPreTrainedModel):
 
     def set_input_embeddings(self, value):
         self.embed_tokens = value
+    
+    
+    def j_prepare_decoder_attention_mask_with_guess(self, attention_mask, input_shape, inputs_embeds, past_key_values_length, others):
+        # create causal mask
+        # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
+        guess_len, guess_size = others
+        combined_attention_mask = None
+        #print("size: ", input_shape, past_key_values_length)
+        if input_shape[-1] > 1:
+            combined_attention_mask = j_make_causal_mask_with_guess(
+                guess_len,
+                guess_size,
+                input_shape,
+                inputs_embeds.dtype,
+                device=inputs_embeds.device,
+                past_key_values_length=past_key_values_length,
+            )
+        if attention_mask is not None:
+            
+            # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
+            expanded_attn_mask = _expand_mask(attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]).to(
+                inputs_embeds.device
+            )
+            #print("shape: ", expanded_attn_mask.size(), combined_attention_mask.size())
+            combined_attention_mask = (
+                expanded_attn_mask if combined_attention_mask is None else expanded_attn_mask + combined_attention_mask
+            )
+
+        return combined_attention_mask
+    
+    
+    @add_start_docstrings_to_model_forward(LLAMA_INPUTS_DOCSTRING)
+    def forward_with_guess(
+        self,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        guess_len=0,
+        guess_size=6,
+    ) -> Union[Tuple, BaseModelOutputWithPast]:
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        use_cache = use_cache if use_cache is not None else self.config.use_cache
+
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        # retrieve input_ids and inputs_embeds
+        if input_ids is not None and inputs_embeds is not None:
+            raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
+        elif input_ids is not None:
+            batch_size, seq_length = input_ids.shape
+        elif inputs_embeds is not None:
+            batch_size, seq_length, _ = inputs_embeds.shape
+        else:
+            raise ValueError("You have to specify either input_ids or inputs_embeds")
+
+        seq_length_with_past = seq_length
+        past_key_values_length = 0
+
+        if past_key_values is not None:
+            past_key_values_length = past_key_values[0][0].shape[2]
+            seq_length_with_past = seq_length_with_past + past_key_values_length
+            
+        ############################################################################################
+        if use_cache and past_key_values is None:
+            past_key_values = DynamicCache()
+            
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_tokens(input_ids)
+
+        if cache_position is None:
+            past_seen_tokens = len(past_key_values) if past_key_values is not None else 0
+            cache_position = torch.arange(
+                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1], device=inputs_embeds.device
+            )
+
+        if position_ids is None:
+            position_ids = cache_position.unsqueeze(0)
+            raise NotImplementedError("position_ids is None")
+        else:
+            position_ids = position_ids.view(-1, seq_length).long()
+            
+        logger.info(f"position_ids: {position_ids}")
+        #############################################################################################    
+        
+        
+        # embed positions
+        if attention_mask is None:
+            attention_mask = torch.ones(
+                (batch_size, seq_length_with_past), dtype=torch.bool, device=inputs_embeds.device
+            )
+            padding_mask = None
+        else:
+            if 0 in attention_mask:
+                padding_mask = attention_mask
+            else:
+                padding_mask = None
+
+        attention_mask = self.j_prepare_decoder_attention_mask_with_guess(
+            attention_mask, (batch_size, seq_length), inputs_embeds, past_key_values_length, (guess_len, guess_size), 
+        )
+
+        hidden_states = inputs_embeds
+        
+        # create position embeddings to be shared across the decoder layers
+        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        
+        all_hidden_states = () if output_hidden_states else None
+        all_self_attns = () if output_attentions else None
+        next_decoder_cache = () if use_cache else None
+        
+        for idx, decoder_layer in enumerate(self.layers):
+            if output_hidden_states:
+                all_hidden_states += (hidden_states,)
+            # past_key_value = past_key_values[idx] if past_key_values is not None else None
+            layer_outputs = decoder_layer.forward(
+                hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_value=past_key_values,
+                output_attentions=output_attentions,
+                use_cache=use_cache,
+                padding_mask=padding_mask,
+                position_embeddings=position_embeddings,
+            )
+            
+            # logger.info(f"layer_outputs: {layer_outputs}")
+            # logger.info(f"return_dict: {return_dict}")
+            
+            hidden_states = layer_outputs[0]
+            if output_attentions:
+                all_self_attns += (layer_outputs[1],)
+                
+        hidden_states = self.norm(hidden_states)
+        
+        if output_hidden_states:
+            all_hidden_states += (hidden_states,)
+        
+        if not return_dict:
+            return tuple(v for v in [hidden_states, past_key_values, all_hidden_states, all_self_attns] if v is not None)
+        return BaseModelOutputWithPast(
+            last_hidden_state=hidden_states,
+            past_key_values=past_key_values,
+            hidden_states=all_hidden_states,
+            attentions=all_self_attns,
+        )
+            
 
     @add_start_docstrings_to_model_forward(LLAMA_INPUTS_DOCSTRING)
     def forward(
@@ -892,7 +1047,6 @@ class LlamaModel(LlamaPreTrainedModel):
             position_ids = position_ids.view(-1, seq_length).long()
             
         logger.info(f"position_ids: {position_ids}")
-            
         #############################################################################################    
             
         # embed positions
@@ -1224,16 +1378,24 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         logger.info(f"input_ids: {input_ids}")
         
         # 6. Set the max length depending on other stopping criteria
-        minimum_length = 100
+        minimum_length = 512
         input_ids_length = input_ids.shape[-1]
         has_default_max_length = kwargs.get("max_length") is None and generation_config.max_length is not None
         
         if has_default_max_length and generation_config.max_length < minimum_length: # Since its default value is 20. Erase this in the future
+            logger.info("set max_length, opt 1")
             generation_config.max_length = minimum_length
             
         if generation_config.max_new_tokens is not None:
+            logger.info("set max_length, opt 2")
+            logger.info(f"input ids length: {input_ids_length}")
+            logger.info(f"max_new_tokens: {generation_config.max_new_tokens}")
+            generation_config.max_new_tokens = kwargs.get('max_new_tokens', 256)
             generation_config.max_length = input_ids_length + generation_config.max_new_tokens
         self._validate_generated_length(generation_config, input_ids_length, has_default_max_length)
+        
+        logger.info(f"generation_config.max_length: {generation_config.max_length}")
+        # return
         
         if self.device.type != input_ids.device.type:
             warnings.warn(
@@ -1424,15 +1586,16 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         logger.info(f"GUESS_SET_SIZE: {GUESS_SET_SIZE}")
         
         while True:
-            if past_tokens[LEVEL-2] is not None:
-                logger.info(f"steps: {steps}")
-                logger.info(f"fill_level: {fill_level}")
-                logger.info(f"past_tokens: {past_tokens}")
-                for idx, item in enumerate(past_tokens):
-                    logger.info(f"{idx} item's length: {len(item)}")
-                logger.info(f"cache engine state: {ngram_cache.token_map}")
-                logger.info(f"Terminate the loop for the debugging purpose")
-                break
+            # Termination condition for debugging (break cond set 1)
+            # if past_tokens[LEVEL-2] is not None:
+            #     logger.info(f"steps: {steps}")
+            #     logger.info(f"fill_level: {fill_level}")
+            #     logger.info(f"past_tokens: {past_tokens}")
+            #     for idx, item in enumerate(past_tokens):
+            #         logger.info(f"{idx} item's length: {len(item)}")
+            #     logger.info(f"cache engine state: {ngram_cache.token_map}")
+            #     logger.info(f"Terminate the loop for the debugging purpose")
+            #     break
             
             logger.info(f"steps: {steps}")
             logger.info(f"guess_tokens: {guess_tokens}") 
@@ -1444,6 +1607,10 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             # Currently this if block is not used, and will be further examined in the future
             if past_tokens[LEVEL - 2] is not None and ngram_cache.has(lst_token) and GUESS_SET_SIZE > 0:  
                 guess_tokens_ = ngram_cache.get_guess_tokens(lst_token)
+                logger.info(f"lst_token: {lst_token}")
+                logger.info(f"guess_tokens_: {guess_tokens_}")
+                logger.info("reached termination condition for debugging, point type 2")
+                # break
                 guess_tokens = []
                 for tok in list(guess_tokens_):
                     guess_tokens += list(tok)
@@ -1593,7 +1760,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
                 outputs, model_kwargs, is_encoder_decoder=self.config.is_encoder_decoder
             )
             
-             # if eos_token was found in one sentence, set sentence to finished
+            # if eos_token was found in one sentence, set sentence to finished
             if eos_token_id_tensor is not None:
                 unfinished_sequences = unfinished_sequences.mul(
                     next_tokens.tile(eos_token_id_tensor.shape[0], 1).ne(eos_token_id_tensor.unsqueeze(1)).prod(dim=0)

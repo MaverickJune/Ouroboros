@@ -43,12 +43,12 @@ def test_llama(input=None, model=None, tokenizer=None):
         window_size = 20
         guess_set_size = 20
         lookahead_level = 7
-        gamma = 12
+        gamma = 256
         ctx = None
         top_k = 3
         ngram_cache = CacheEngine(lookahead_level, guess_set_size)
         
-        model.spiral_generate(tokenized_input, 
+        output_ids = model.spiral_generate(tokenized_input, 
                               max_new_tokens=gamma, 
                               continue_ctx=ctx, 
                               continue_flag=(ctx != None), 
@@ -57,7 +57,12 @@ def test_llama(input=None, model=None, tokenizer=None):
                               guess_set_size = guess_set_size, 
                               lookahead_level = lookahead_level, 
                               ngram_cache = ngram_cache)
-    run_spiral_decode()
+        
+        generated_text = tokenizer.batch_decode(output_ids, skip_special_tokens=False)[0]
+        return generated_text
+        
+    get_result = run_spiral_decode()
+    print(get_result)
     return "Test completed without default generation"
 
 

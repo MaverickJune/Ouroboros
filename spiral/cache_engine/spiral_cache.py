@@ -1,4 +1,7 @@
 import torch
+from spiral.log_config import get_logger
+
+logger = get_logger(__name__)
 
 class CacheEngine():
     def __init__(self, LEVEL, GUESS_SET_SIZE):
@@ -69,6 +72,8 @@ class CacheEngine():
             if lst_token not in self.token_map:
                 self.token_map[lst_token] = []
             tup = tuple(past_tokens[ll][0] for ll in range(1, LEVEL - 1)) + (new_results[0],)
+            
+            logger.info(f"Inserting {tup} into {lst_token}")
 
             if tup in self.token_map[lst_token]:
                 self.token_map[lst_token].remove(tup)
