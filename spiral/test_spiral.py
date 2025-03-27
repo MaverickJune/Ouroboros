@@ -53,7 +53,9 @@ spiral_output = activate_spiral(
     gamma=gamma,
     window_size=WINDOW_SIZE,
     guess_set_size=GUESS_SET_SIZE,
-    lookahead_level=LOOKAHEAD_LEVEL
+    lookahead_level=LOOKAHEAD_LEVEL,
+    eos_token_id=tokenizer.eos_token_id,
+    topk=top_k
 )
 
 # Print out the output

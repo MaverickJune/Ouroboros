@@ -62,6 +62,7 @@ def test_llama(input=None, model=None, tokenizer=None):
         return generated_text
         
     get_result = run_spiral_decode()
+    print(f"eos_token_id: {tokenizer.eos_token_id}")
     print(get_result)
     return "Test completed without default generation"
 
