@@ -592,6 +592,7 @@ class LlamaModel(LlamaPreTrainedModel):
         return_dict: Optional[bool] = None,
         guess_len=0,
         guess_size=6,
+        cache_position: Optional[torch.LongTensor] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -1627,11 +1628,13 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
             return all_old_tokens[-1]
         
         set_token = copy_from
+        past_tokens = None
         if not continue_flag:
             past_tokens = [[set_token() for _ in range(WINDOW_SIZE + LEVEL - 3)]] + [None for _ in range(LEVEL - 2)]
             
         logger.info(f"continue_flag: {continue_flag}")
-        logger.info(f"past_tokens: {past_tokens}")
+        if past_tokens is not None:
+            logger.info(f"past_tokens: {past_tokens}")
         
         #TODO: Get the meaning of these variables
         fill_level = 0
