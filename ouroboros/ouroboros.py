@@ -101,6 +101,7 @@ def ouroboros(prefix : torch.Tensor, approx_model : torch.nn.Module, target_mode
 
             first_tok = int(target_model_cache._prob_history[:, prefix_len + gen_len - 1, :].argmax(dim=-1))
             beg_pos = prefix_len + gen_len
+            guess = [item for sublist in guess for item in sublist] # added this line
             guess_num = len(guess) // guess_size
             for i in range(guess_num):
                 real_ngram = tuple([first_tok] + target_model_cache._prob_history[0, beg_pos + i * guess_size : beg_pos + i * guess_size + guess_size - 1, :].argmax(dim=-1).tolist())
@@ -125,6 +126,8 @@ def ouroboros(prefix : torch.Tensor, approx_model : torch.nn.Module, target_mode
             for i in range(guess_num):
                 real_ngram = [first_tok] + target_model_cache._prob_history[0, beg_pos + i * guess_size : beg_pos + i * guess_size + guess_size, :].argmax(dim=-1).tolist()
                 corr_ngram.append(tuple(real_ngram[:-1]))
+                # the above two lines (=) real_ngram = tuple([first_tok] + target_model_cache._prob_history[0, beg_pos + i * guess_size : beg_pos + i * guess_size + guess_size - 1, :].argmax(dim=-1).tolist())
+                
                 pred_ngram = guess[i * guess_size : (i + 1) * guess_size]
                 ml = 0
                 for j in range(guess_size):

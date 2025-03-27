@@ -41,9 +41,8 @@ class KVCacheModelLade():
     @torch.no_grad()
     def rollback(self, end_pos : int):
         for i in range(len(self.ctx['past_key_values'])):
-            k = self.ctx['past_key_values'][i][0][:,:,:end_pos,:]
-            v = self.ctx['past_key_values'][i][1][:,:,:end_pos,:]
-            self.ctx['past_key_values'][i] = (k, v)
+            self.ctx['past_key_values'].key_cache[i] = self.ctx['past_key_values'].key_cache[i][:,:,:end_pos,:]
+            self.ctx['past_key_values'].value_cache[i] = self.ctx['past_key_values'].value_cache[i][:,:,:end_pos,:]
     
     def update_ngram_cache(self, remaining_approx_tok: torch.tensor, remaining_target_tok: torch.tensor):
         assert remaining_approx_tok.shape[-1] == remaining_target_tok.shape[-1]
@@ -112,60 +111,33 @@ class KVCacheModelSimpleWithGuess():
         
         return 
     
+    #TODO: since kv cache is not a list anymore, update the code properly
     @torch.no_grad()
     def rollback(self, end_pos : int):
-        past_key_values_trimmed = []
         assert self._past_key_values
-        for kv in self._past_key_values:
+        for idx, kv in enumerate(self._past_key_values):
             k, v = kv
             # NOTE() the indexing is specific for bloom. This won't work for other models
             # For example llama k, v should be (batch, num_head, seq_len, hidden_dim)
             
             # k, v (batch, head, seq, hidden_dim)
-            k = k[:, :, :end_pos, :]
-            v = v[:, :, :end_pos, :]
-            kv_trimmed = (k, v)
-            past_key_values_trimmed.append(kv_trimmed)
+            self._past_key_values.key_cache[idx] = k[:, :, :end_pos, :]
+            self._past_key_values.value_cache[idx] = v[:, :, :end_pos, :]
         
-        self._past_key_values = past_key_values_trimmed
-        for kv in self._past_key_values:
-            k, v = kv
-            cached_len = k.shape[2]
-        self._prob_history = self._prob_history[:, :end_pos, :]
-        self.idx = end_pos
-    
-    @torch.no_grad()
-    def rollback(self, end_pos : int):
-        past_key_values_trimmed = []
-        assert self._past_key_values
-        for kv in self._past_key_values:
-            k, v = kv
-            # NOTE() the indexing is specific for bloom. This won't work for other models
-            # For example llama k, v should be (batch, num_head, seq_len, hidden_dim)
-            
-            # k, v (batch, head, seq, hidden_dim)
-            k = k[:, :, :end_pos, :]
-            v = v[:, :, :end_pos, :]
-            kv_trimmed = (k, v)
-            past_key_values_trimmed.append(kv_trimmed)
-        
-        self._past_key_values = past_key_values_trimmed
         self._prob_history = self._prob_history[:, :end_pos, :]
         self.idx = end_pos
     
     @torch.no_grad()
     def confirm(self, cur_len, start_pos, length):
         assert self._past_key_values
-        past_key_values_trimmed = []
-        for kv in self._past_key_values:
+        for idx, kv in enumerate(self._past_key_values):
             k, v = kv
-            k[:, :, cur_len:cur_len + length, :] = k[:, :, start_pos: start_pos + length, :]
-            k = k[:, :, :cur_len + length, :]
-            v[:, :, cur_len:cur_len + length, :] = v[:, :, start_pos: start_pos + length, :]
-            v = v[:, :, :cur_len + length, :]
-            kv_trimmed = (k, v)
-            past_key_values_trimmed.append(kv_trimmed)
-        self._past_key_values = past_key_values_trimmed
+            self._past_key_values.key_cache[idx][:, :, cur_len:cur_len + length, :] = self._past_key_values.key_cache[idx][:, :, start_pos: start_pos + length, :]
+            self._past_key_values.value_cache[idx][:, :, cur_len:cur_len + length, :] = self._past_key_values.value_cache[idx][:, :, start_pos: start_pos + length, :]
+            
+            self._past_key_values.key_cache[idx] = self._past_key_values.key_cache[idx][:, :, :cur_len + length, :]
+            self._past_key_values.value_cache[idx] = self._past_key_values.value_cache[idx][:, :, :cur_len + length, :] 
+            
         self._prob_history[:, cur_len:cur_len + length, :] = self._prob_history[:, start_pos: start_pos + length, :]
         self._prob_history = self._prob_history[:, :cur_len + length, :]
         self.idx = cur_len + length

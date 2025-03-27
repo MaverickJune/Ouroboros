@@ -134,7 +134,7 @@ class KVCacheModelSimpleWithGuess():
         self._prob_history = self._prob_history[:, :end_pos, :]
         self.idx = end_pos
     
-    @torch.no_grad()
+    @torch.no_grad() # this will be called anyway
     def rollback(self, end_pos : int):
         past_key_values_trimmed = []
         assert self._past_key_values
